@@ -6,102 +6,100 @@
 //for glm::value_ptr() :
 #include <glm/gtc/type_ptr.hpp>
 
+#include "Load.hpp"
+#include "data_path.hpp"
+#include "read_write_chunk.hpp"
 #include <random>
+#include <fstream>
+#include <stdexcept>
+#include <deque>
+
+
+//heavily assisted by ChatGPT
+
+// global streams for asset files
+std::ifstream palette_stream;
+std::ifstream tile_stream;
+
+/*
+//random seed setup
+std::random_device rd;
+std::mt19937 gen(rd());
+std::uniform_int_distribution<int> dist(1, 100);
+*/
+
+//init (note: could be moved to an init function for organization)
+bool player_live = true;
+
+bool holding_brick = false;
+
+struct Brick {
+    float x_pos;
+    float y_pos;
+    bool held;
+    bool active;
+
+    Brick(float x = 0.0f, float y = 0.0f, bool h = false)
+        : x_pos(x), y_pos(y), held(h), active(true) {}
+};
+std::deque<Brick> bricks;
+
+int PlayerYDirection = 1;
+float brickTimer = 0.0f;
+
+
+// use Load<> to open the files after OpenGL context is ready
+Load<void> ps(LoadTagDefault, []() {
+    palette_stream.open(data_path("../assets/palettes.asset"), std::ios::binary);
+    if (!palette_stream.is_open()) {
+        throw std::runtime_error("Failed to open palettes.asset");
+    }
+
+    tile_stream.open(data_path("../assets/tiles.asset"), std::ios::binary);
+    if (!tile_stream.is_open()) {
+        throw std::runtime_error("Failed to open tiles.asset");
+    }
+});
+
 
 PlayMode::PlayMode() {
-	//TODO:
-	// you *must* use an asset pipeline of some sort to generate tiles.
-	// don't hardcode them like this!
-	// or, at least, if you do hardcode them like this,
-	//  make yourself a script that spits out the code that you paste in here
-	//   and check that script into your repository.
+    // --- load tiles and palettes from files ---
+    std::vector<PPU466::Palette> palettes;
+    std::vector<PPU466::Tile> tiles;
 
-	//Also, *don't* use these tiles in your game:
+    read_chunk(palette_stream, std::string("pale"), &palettes);
+    read_chunk(tile_stream, std::string("tile"), &tiles);
 
-	{ //use tiles 0-16 as some weird dot pattern thing:
-		std::array< uint8_t, 8*8 > distance;
-		for (uint32_t y = 0; y < 8; ++y) {
-			for (uint32_t x = 0; x < 8; ++x) {
-				float d = glm::length(glm::vec2((x + 0.5f) - 4.0f, (y + 0.5f) - 4.0f));
-				d /= glm::length(glm::vec2(4.0f, 4.0f));
-				distance[x+8*y] = uint8_t(std::max(0,std::min(255,int32_t( 255.0f * d ))));
-			}
-		}
-		for (uint32_t index = 0; index < 16; ++index) {
-			PPU466::Tile tile;
-			uint8_t t = uint8_t((255 * index) / 16);
-			for (uint32_t y = 0; y < 8; ++y) {
-				uint8_t bit0 = 0;
-				uint8_t bit1 = 0;
-				for (uint32_t x = 0; x < 8; ++x) {
-					uint8_t d = distance[x+8*y];
-					if (d > t) {
-						bit0 |= (1 << x);
-					} else {
-						bit1 |= (1 << x);
-					}
-				}
-				tile.bit0[y] = bit0;
-				tile.bit1[y] = bit1;
-			}
-			ppu.tile_table[index] = tile;
-		}
+    palette_stream.close();
+    tile_stream.close();
+
+    std::cout << "Tiles num = " << tiles.size() << std::endl;
+
+    int tile_start = 32; // player sprite start
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        ppu.tile_table[tile_start + i] = tiles[i];
+    }
+
+    // palettes: assign only first N
+    for (size_t i = 0; i < palettes.size() && i < 7; ++i) {
+        ppu.palette_table[i + 1] = palettes[i];
+    }
+
+    // create a blank tile
+	PPU466::Tile blank_tile;
+	blank_tile.bit0.fill(0);
+	blank_tile.bit1.fill(0);
+	ppu.tile_table[0] = blank_tile;
+
+	// fill background with tile 0
+	for (auto &bg : ppu.background) {
+		bg = 0; // tile index 0, palette 0
 	}
 
-	//use sprite 32 as a "player":
-	ppu.tile_table[32].bit0 = {
-		0b01111110,
-		0b11111111,
-		0b11111111,
-		0b11111111,
-		0b11111111,
-		0b11111111,
-		0b11111111,
-		0b01111110,
-	};
-	ppu.tile_table[32].bit1 = {
-		0b00000000,
-		0b00000000,
-		0b00011000,
-		0b00100100,
-		0b00000000,
-		0b00100100,
-		0b00000000,
-		0b00000000,
-	};
-
-	//makes the outside of tiles 0-16 solid:
-	ppu.palette_table[0] = {
-		glm::u8vec4(0x00, 0x00, 0x00, 0x00),
-		glm::u8vec4(0x00, 0x00, 0x00, 0xff),
-		glm::u8vec4(0x00, 0x00, 0x00, 0x00),
-		glm::u8vec4(0x00, 0x00, 0x00, 0xff),
-	};
-
-	//makes the center of tiles 0-16 solid:
-	ppu.palette_table[1] = {
-		glm::u8vec4(0x00, 0x00, 0x00, 0x00),
-		glm::u8vec4(0x00, 0x00, 0x00, 0x00),
-		glm::u8vec4(0x00, 0x00, 0x00, 0xff),
-		glm::u8vec4(0x00, 0x00, 0x00, 0xff),
-	};
-
-	//used for the player:
-	ppu.palette_table[7] = {
-		glm::u8vec4(0x00, 0x00, 0x00, 0x00),
-		glm::u8vec4(0xff, 0xff, 0x00, 0xff),
-		glm::u8vec4(0x00, 0x00, 0x00, 0xff),
-		glm::u8vec4(0x00, 0x00, 0x00, 0xff),
-	};
-
-	//used for the misc other sprites:
-	ppu.palette_table[6] = {
-		glm::u8vec4(0x00, 0x00, 0x00, 0x00),
-		glm::u8vec4(0x88, 0x88, 0xff, 0xff),
-		glm::u8vec4(0x00, 0x00, 0x00, 0xff),
-		glm::u8vec4(0x00, 0x00, 0x00, 0x00),
-	};
-
+    // clear background tilemap (so no repeating palette blocks)
+    for (auto &bg : ppu.background) {
+        bg = 0; // use tile 0 and palette 0
+    }
 }
 
 PlayMode::~PlayMode() {
@@ -148,64 +146,143 @@ bool PlayMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size)
 
 void PlayMode::update(float elapsed) {
 
-	//slowly rotates through [0,1):
-	// (will be used to set background color)
-	background_fade += elapsed / 10.0f;
-	background_fade -= std::floor(background_fade);
 
-	constexpr float PlayerSpeed = 30.0f;
+	constexpr float PlayerSpeed = 80.0f;
+	constexpr float PlayerYSpeed = 30.0f;
+	float PlayerYVel = PlayerYSpeed * PlayerYDirection;
+	constexpr float UpperBound = 210.0f; //screen height 240px, lilguy is 30 tall
+	constexpr float LowerBound = 140.0f;
+	constexpr float BrickSpeed = 120.0f;
+	constexpr float BrickCooldown = 0.2f;
+
+	brickTimer = std::max(0.0f, brickTimer - elapsed);
+	/*
 	if (left.pressed) player_at.x -= PlayerSpeed * elapsed;
 	if (right.pressed) player_at.x += PlayerSpeed * elapsed;
 	if (down.pressed) player_at.y -= PlayerSpeed * elapsed;
 	if (up.pressed) player_at.y += PlayerSpeed * elapsed;
+	*/
+
+	//move brick
+	if (!bricks.empty() && bricks.back().held) {
+		if (left.pressed) bricks.back().x_pos = std::max(0.0f, bricks.back().x_pos - BrickSpeed * elapsed);
+		if (right.pressed) bricks.back().x_pos = std::min(240.0f, bricks.back().x_pos + BrickSpeed * elapsed);
+	}
+	//note: screen width is 256px (240 - brick width)
+
+	//throw brick
+	if (up.pressed && holding_brick && !bricks.empty() && brickTimer == 0.0f) {
+		holding_brick = false;
+		bricks.back().held = false;
+		brickTimer = BrickCooldown;
+	}
 
 	//reset button press counters:
 	left.downs = 0;
 	right.downs = 0;
 	up.downs = 0;
 	down.downs = 0;
-}
 
-void PlayMode::draw(glm::uvec2 const &drawable_size) {
-	//--- set ppu state based on game state ---
+	//update all brick pos
+	for (Brick &brick : bricks) {
+		if (brick.held) continue;
+		brick.y_pos += BrickSpeed * elapsed;
+		if (brick.y_pos > 240.0f) brick.active = false;
+	}
 
-	//background color will be some hsv-like fade:
-	ppu.background_color = glm::u8vec4(
-		std::min(255,std::max(0,int32_t(255 * 0.5f * (0.5f + std::sin( 2.0f * M_PI * (background_fade + 0.0f / 3.0f) ) ) ))),
-		std::min(255,std::max(0,int32_t(255 * 0.5f * (0.5f + std::sin( 2.0f * M_PI * (background_fade + 1.0f / 3.0f) ) ) ))),
-		std::min(255,std::max(0,int32_t(255 * 0.5f * (0.5f + std::sin( 2.0f * M_PI * (background_fade + 2.0f / 3.0f) ) ) ))),
-		0xff
-	);
+	//update lilguy (player) pos
+	player_at.x += PlayerSpeed * elapsed;
+	float expected_player_y = player_at.y + PlayerYVel * elapsed;
+	if (expected_player_y > UpperBound) {
+		expected_player_y = (UpperBound - expected_player_y) + UpperBound;
+		PlayerYDirection = -1;
+	}
+	else if (expected_player_y < LowerBound) {
+		expected_player_y = (LowerBound - expected_player_y) + LowerBound;
+		PlayerYDirection = 1;
+	}
+	player_at.y = expected_player_y;
 
-	//tilemap gets recomputed every frame as some weird plasma thing:
-	//NOTE: don't do this in your game! actually make a map or something :-)
-	for (uint32_t y = 0; y < PPU466::BackgroundHeight; ++y) {
-		for (uint32_t x = 0; x < PPU466::BackgroundWidth; ++x) {
-			//TODO: make weird plasma thing
-			ppu.background[x+PPU466::BackgroundWidth*y] = ((x+y)%16);
+	//check collision
+	for (Brick &brick : bricks) {
+		//player loops smoothly, so take mod of 256
+		float x_diff = fmod(player_at.x, 256.0f) - brick.x_pos;
+		bool x_collision = (x_diff > -20.0f) && (x_diff < 16.0f);
+		float y_diff = player_at.y - brick.y_pos;
+		bool y_collision = (y_diff > -16.0f) && (y_diff < 30.0f);
+
+		if (x_collision && y_collision) {
+			player_live = false;
+			brick.active = false;
+			break;
 		}
 	}
 
-	//background scroll:
-	ppu.background_position.x = int32_t(-0.5f * player_at.x);
-	ppu.background_position.y = int32_t(-0.5f * player_at.y);
-
-	//player sprite:
-	ppu.sprites[0].x = int8_t(player_at.x);
-	ppu.sprites[0].y = int8_t(player_at.y);
-	ppu.sprites[0].index = 32;
-	ppu.sprites[0].attributes = 7;
-
-	//some other misc sprites:
-	for (uint32_t i = 1; i < 63; ++i) {
-		float amt = (i + 2.0f * background_fade) / 62.0f;
-		ppu.sprites[i].x = int8_t(0.5f * float(PPU466::ScreenWidth) + std::cos( 2.0f * M_PI * amt * 5.0f + 0.01f * player_at.x) * 0.4f * float(PPU466::ScreenWidth));
-		ppu.sprites[i].y = int8_t(0.5f * float(PPU466::ScreenHeight) + std::sin( 2.0f * M_PI * amt * 3.0f + 0.01f * player_at.y) * 0.4f * float(PPU466::ScreenWidth));
-		ppu.sprites[i].index = 32;
-		ppu.sprites[i].attributes = 6;
-		if (i % 2) ppu.sprites[i].attributes |= 0x80; //'behind' bit
+	//spawn a brick
+	if (!holding_brick && brickTimer == 0.0f) {
+		Brick new_brick =  Brick(100.0f, 0.0f, true);
+		bricks.push_back(new_brick);
+		holding_brick = true;
 	}
 
-	//--- actually draw ---
-	ppu.draw(drawable_size);
+	//despawn bricks (only check oldest)
+	if (!bricks[0].active) {
+		bricks.pop_front();
+	}
 }
+
+void PlayMode::draw(glm::uvec2 const &drawable_size) {
+
+    // --- clear all sprites off-screen ---
+    for(auto &sprite : ppu.sprites) sprite.y = 240; // offscreen
+
+    int slot = 0;
+
+	constexpr int player_tile_start = 32;
+	constexpr int player_cols = 3; // 20px / 8px → rounded up
+	constexpr int player_rows = 4; // 30px / 8px → rounded up
+
+	// --- draw player sprite ---
+	if (player_live) {
+		
+
+		for(int ty = player_rows - 1; ty >= 0; --ty){
+			for(int tx = 0; tx < player_cols; ++tx){
+				ppu.sprites[slot].x = int8_t(player_at.x + tx*8);
+				ppu.sprites[slot].y = int8_t(player_at.y + (player_rows - 1 - ty)*8);
+				ppu.sprites[slot].index = uint8_t(player_tile_start + ty*player_cols + tx);
+				ppu.sprites[slot].attributes = 1; // palette 1 for player
+				++slot;
+			}
+		}
+	}
+
+    // --- draw one big brick ---
+
+	constexpr int brick_tile_start = player_tile_start + player_cols*player_rows; // after lilguy
+	constexpr int brick_cols = 2; // 16px / 8px
+	constexpr int brick_rows = 2;
+
+	for (Brick &brick : bricks) {
+		for(int ty = 0; ty < brick_rows; ++ty){    // top-to-bottom in asset
+			for(int tx = 0; tx < brick_cols; ++tx){ // left-to-right
+				ppu.sprites[slot].x = int8_t(brick.x_pos + tx*8);
+				ppu.sprites[slot].y = int8_t(brick.y_pos + (brick_rows - 1 - ty)*8);
+				ppu.sprites[slot].index = uint8_t(brick_tile_start + ty*brick_cols + tx);
+				ppu.sprites[slot].attributes = 2; // palette 2
+				++slot;
+			}
+		}
+	}
+
+	
+
+    // --- set background color to white ---
+    ppu.background_color = glm::u8vec3(255,255,255);
+
+    // --- draw ---
+    ppu.draw(drawable_size);
+}
+
+
+
